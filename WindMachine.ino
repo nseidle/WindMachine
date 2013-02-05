@@ -113,8 +113,8 @@ void setup()
   bargraphdivisor = 34;
 
   // reset working values to zero
-  resetpeak(true);
-
+  resetPeak(true);
+  
   // turn on interrupts
   attachInterrupt(0,interrupt,FALLING);
   interrupts();
@@ -149,7 +149,7 @@ void loop() // ths subroutine runs continuously after setup() ends
 
     // pulse LED
     currentLEDPWM = 255;
-    update();
+    updateDisplays();
   }
 
   // zero currentRPM and displays if we don't get a reading in ZERODELAY ms
@@ -158,7 +158,7 @@ void loop() // ths subroutine runs continuously after setup() ends
   {
     currentRPM = 0; 
     last = 0ul;
-    update();
+    updateDisplays();
   }
   stopped++;
 
@@ -166,7 +166,7 @@ void loop() // ths subroutine runs continuously after setup() ends
   if (digitalRead(BUTTON_RESET) == 0)
   {
     // reduce the displays to zero in an entertaining way
-    resetpeak(false);
+    resetPeak(false);
   }
 
   // fan button pressed, turn on fan and leave on for at least one second (to reduce wear)
@@ -210,7 +210,7 @@ void loop() // ths subroutine runs continuously after setup() ends
     bargraphdivisor *= 2;
 }
 
-void update() // update all displays
+void updateDisplays() // update all displays
 {
   serial7segmentWrite(currentRPM, CS_CURRENT_DISPLAY);
   serial7segmentWrite(peakRPM, CS_PEAK_DISPLAY);
@@ -271,7 +271,7 @@ void serial7segmentWrite(unsigned int number, byte sspin)
   digitalWrite(sspin,HIGH); 
 }
 
-void resetpeak(boolean resetbest)
+void resetPeak(boolean resetbest)
 // reduce displays to zero in a hopefully entertaining way
 {
   while ((peakRPM > 0) || (currentRPM > 0))
@@ -279,7 +279,7 @@ void resetpeak(boolean resetbest)
     if (resetbest) if (bestRPM > 0) bestRPM--;
     if (peakRPM > 0) peakRPM--;
     if (currentRPM > 0) currentRPM--;
-    update();
+    updateDisplays();
     delay(1);
   }
   last = 0ul;
