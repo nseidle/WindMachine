@@ -36,21 +36,22 @@ const int minfantime = 15000; // ms, time fan will be on after fan button is rel
 
 // I/O pins to external hardware
 const int STATUSLED = 13; // green LED on back of Arduino Pro board
-const int BUTTON1 = 12; // reset button
+const int BUTTON_RESET = 12; // reset button, aka button 1
 //const int MOSI = 11; // SPI output to all displays
-const int CURRENT = 10; // CS to 7-segment display
-const int PEAK = 9; // CS to 7-segment display
-const int BEST = 8; // CS to 7-segment display
+const int CS_CURRENT_DISPLAY = 10; // CS to 7-segment display
+const int CS_PEAK_DISPLAY = 9; // CS to 7-segment display
+const int CS_BEST_DISPLAY = 8; // CS to 7-segment display
 const int BARGRAPH_LATCH = 7; // latch to bargraph display
 const int BEST_LED = 6;
 const int PEAK_LED = 5;
-const int BUTTON2 = 4; // start button
+const int BUTTON_START = 4; // start button, aka button 2
 const int CURRENT_LED = 3;
 const int TACH = 2; // input from RPM sensor board
 const int RELAY = A0; // output to fan relay
 
 // global variables
-unsigned int RPM, peak, best, stopped, relaytimer, bargraphdivisor;
+unsigned int stopped, relaytimer, bargraphdivisor;
+unsigned int currentRPM, peakRPM, bestRPM;
 unsigned int currentLEDPWM, peakLEDPWM, bestLEDPWM;
 // volatiles are subject to modification by IRQ
 volatile unsigned long tempRPM, time, last, interval;
@@ -61,20 +62,20 @@ void setup()
 {
   // set up inputs and outputs (all outputs power up LOW)
   pinMode(STATUSLED,OUTPUT);
-  pinMode(CURRENT,OUTPUT);
-  pinMode(PEAK,OUTPUT);
-  pinMode(BEST,OUTPUT);
+  pinMode(CS_CURRENT_DISPLAY,OUTPUT);
+  pinMode(CS_PEAK_DISPLAY,OUTPUT);
+  pinMode(CS_BEST_DISPLAY,OUTPUT);
   pinMode(BARGRAPH_LATCH,OUTPUT);
   pinMode(CURRENT_LED,OUTPUT);
   pinMode(PEAK_LED,OUTPUT);
   pinMode(BEST_LED,OUTPUT);
   pinMode(RELAY,OUTPUT);
 
-  pinMode(BUTTON2,INPUT);
-  digitalWrite(BUTTON2,HIGH); // turn on pullup
+  pinMode(BUTTON_START,INPUT);
+  digitalWrite(BUTTON_START,HIGH); // turn on pullup
 
-  pinMode(BUTTON1,INPUT);
-  digitalWrite(BUTTON1,HIGH); // turn on pullup
+  pinMode(BUTTON_RESET,INPUT);
+  digitalWrite(BUTTON_RESET,HIGH); // turn on pullup
 
   pinMode(TACH,INPUT);
   digitalWrite(TACH,LOW); // turn off pullup
@@ -91,9 +92,9 @@ void setup()
   SPI.begin(); 
 
   // initialize SPI displays
-  serial7segmentInit(CURRENT);
-  serial7segmentInit(PEAK);
-  serial7segmentInit(BEST);
+  serial7segmentInit(CS_CURRENT_DISPLAY);
+  serial7segmentInit(CS_PEAK_DISPLAY);
+  serial7segmentInit(CS_BEST_DISPLAY);
 
   // initialize serial port
   Serial.begin(9600);
@@ -101,9 +102,9 @@ void setup()
   Serial.println("RESET");
 
   // init globals (set high to test LEDs on reset, will reset to zero using resetpeak()
-  RPM = 1000;
-  peak = 1000;
-  best = 1000;
+  currentRPM = 1000;
+  peakRPM = 1000;
+  bestRPM = 1000;
   stopped = ZERODELAY;
   last = 0;
   currentLEDPWM = 255;
@@ -124,25 +125,25 @@ void loop() // ths subroutine runs continuously after setup() ends
   delay(1); // slow down this loop
 
   // an interrupt occurred in the previous loop, handle it now
-  // the interrupt calculates tempRPM internally, copy to RPM so it doesn't change unexpectedly
+  // the interrupt calculates tempRPM internally, copy to currentRPM so it doesn't change unexpectedly
   if (gotint)
   {
     Serial.println("I");
     gotint = false;
 
-    RPM = word(tempRPM); // grab the RPM value calculated by the interrupt routine
+    currentRPM = word(tempRPM); // grab the RPM value calculated by the interrupt routine
 
     stopped = 0; // reset the stopped timer
 
     // reset the peak values if necessary and pulse LEDs
-    if (RPM > peak)
+    if (currentRPM > peakRPM)
     {
-      peak = RPM;
+      peakRPM = currentRPM;
       peakLEDPWM = 255;
     }
-    if (RPM > best)
+    if (currentRPM > bestRPM)
     {
-      best = RPM;
+      bestRPM = currentRPM;
       bestLEDPWM = 255;
     }
 
@@ -151,18 +152,18 @@ void loop() // ths subroutine runs continuously after setup() ends
     update();
   }
 
-  // zero RPM and displays if we don't get a reading in ZERODELAY ms
+  // zero currentRPM and displays if we don't get a reading in ZERODELAY ms
   // this also zeros the displays every minute (63353ms) in case they're corrupted
   if (stopped > ZERODELAY)
   {
-    RPM = 0; 
+    currentRPM = 0; 
     last = 0ul;
     update();
   }
   stopped++;
 
   // reset button pressed
-  if (digitalRead(BUTTON1) == 0)
+  if (digitalRead(BUTTON_RESET) == 0)
   {
     // reduce the displays to zero in an entertaining way
     resetpeak(false);
@@ -170,7 +171,7 @@ void loop() // ths subroutine runs continuously after setup() ends
 
   // fan button pressed, turn on fan and leave on for at least one second (to reduce wear)
   // (fan will stay on if button is held down)
-  if (digitalRead(BUTTON2) == 0)
+  if (digitalRead(BUTTON_START) == 0)
   {
     relaytimer = 1000; // ms, 1 second
   }
@@ -205,16 +206,16 @@ void loop() // ths subroutine runs continuously after setup() ends
   }
 
   // increase range of bargraph if necessary
-  if ((peak / bargraphdivisor) > 30)
+  if ((peakRPM / bargraphdivisor) > 30)
     bargraphdivisor *= 2;
 }
 
 void update() // update all displays
 {
-  serial7segmentWrite(RPM,CURRENT);
-  serial7segmentWrite(peak,PEAK);
-  serial7segmentWrite(best,BEST);
-  bargraphWrite(RPM/bargraphdivisor,peak/bargraphdivisor);
+  serial7segmentWrite(currentRPM, CS_CURRENT_DISPLAY);
+  serial7segmentWrite(peakRPM, CS_PEAK_DISPLAY);
+  serial7segmentWrite(bestRPM, CS_BEST_DISPLAY);
+  bargraphWrite(currentRPM/bargraphdivisor, peakRPM/bargraphdivisor);
 }
 
 void interrupt()
@@ -273,11 +274,11 @@ void serial7segmentWrite(unsigned int number, byte sspin)
 void resetpeak(boolean resetbest)
 // reduce displays to zero in a hopefully entertaining way
 {
-  while ((peak > 0) || (RPM > 0))
+  while ((peakRPM > 0) || (currentRPM > 0))
   {
-    if (resetbest) if (best > 0) best--;
-    if (peak > 0) peak--;
-    if (RPM > 0) RPM--;
+    if (resetbest) if (bestRPM > 0) bestRPM--;
+    if (peakRPM > 0) peakRPM--;
+    if (currentRPM > 0) currentRPM--;
     update();
     delay(1);
   }
@@ -303,7 +304,7 @@ void serial7segmentInit(byte sspin)
   digitalWrite(sspin,HIGH); 
 }
 
-void bargraphWrite(int number,int peak)
+void bargraphWrite(int number,int peakSegment)
 // light up "number" bargraph segments, plus single "peak" segment
 // inputs are 0-32, but only LEDs 0-30 are connected. 0 for no LED lit
 // (rewrite using long int?)
@@ -361,29 +362,29 @@ void bargraphWrite(int number,int peak)
   // overlay "peak" dot on top of b1-b4
   // do this by calculating 2^(peak-1) = 1<<(peak-1)
   // example for number 4: 2^(4-1) = 8 = B00001000 (fourth LEDs lit)  
-  if (peak > 0)
+  if (peakSegment > 0)
   {
-    if (peak < 9)
+    if (peakSegment < 9)
     {
-      b1 |= (1 << (peak-1));
+      b1 |= (1 << (peakSegment-1));
     }
     else
     {
-      if (peak < 17)
+      if (peakSegment < 17)
       {
-        b2 |= (1 << (peak-9));
+        b2 |= (1 << (peakSegment-9));
       }
       else
       {
-        if (peak < 25)
+        if (peakSegment < 25)
         {
-          b3 |= (1 << (peak-17));
+          b3 |= (1 << (peakSegment-17));
         }
         else
         {
-          if (peak < 33)
+          if (peakSegment < 33)
           {
-            b4 |= (1 << (peak-25));
+            b4 |= (1 << (peakSegment-25));
           }
         }
       }
