@@ -23,16 +23,21 @@
 // Read a momentary pushbutton to reset the peak value for the next child
 // Read a momentary pushbutton to run the fan
 
+// Select Arduino Pro 16MHz @ 5V w/ ATmega328 to load new code
+
+#include <avr/wdt.h> //We need watch dog for this program
+
 #include <SPI.h> // serial-peripheral interface used by displays
 
 // BEHAVIOR CONSTANTS
 
 // delay for setting RPM to zero if no input
-const int ZERODELAY = 1000; // ms
+const long ZERODELAY = 30ul * 1000; // ms, Reset current and peak RPM after some amount of time. 60 seconds = 60,000ms
+const long ZERODELAY_BESTRPM = 10ul * 60 * 1000; // ms, reset maxRPM after 10 minutes
 const boolean PULSELEDS = true; // set true to pulse discrete LEDs when 7-segment displays update
 const int LEDSTATE = HIGH; // if PULSELEDS = false, LEDSTATE is state of LEDs, HIGH or LOW
 const int lowestbargraphdivisor = 3; // initial / reset bar graph divisor (e.g. for RPM/3, 30 LED bargraph has range of 90 (30 * 3))
-const int minfantime = 15000; // ms, time fan will be on after fan button is released (stays on if held down)
+const int fanRunTime = 15000; // ms, time fan will be on after fan button is released (stays on if held down)
 
 // I/O pins to external hardware
 const int STATUSLED = 13; // green LED on back of Arduino Pro board
@@ -50,17 +55,26 @@ const int TACH = 2; // input from RPM sensor board
 const int RELAY = A0; // output to fan relay
 
 // global variables
-unsigned int stopped, relaytimer, bargraphdivisor;
+unsigned int bargraphdivisor;
+long relayTimer, timeLastInteraction, timeResetBestRPM; //variables connected to millis()
 unsigned int currentRPM, peakRPM, bestRPM;
 unsigned int currentLEDPWM, peakLEDPWM, bestLEDPWM;
+boolean fanOn;
 // volatiles are subject to modification by IRQ
-volatile unsigned long tempRPM, time, last, interval;
+volatile unsigned long tempRPM, interval;
+volatile unsigned long timeCurrentTick, timeSinceLastTick;
 volatile boolean gotint = false;
 
 void setup()
 // this subroutine runs once upon reboot
 {
+  wdt_reset(); //Pet the dog
+  wdt_disable(); //We don't want the watchdog during init
+
   // set up inputs and outputs (all outputs power up LOW)
+  pinMode(RELAY,OUTPUT);
+  digitalWrite(RELAY,LOW); //Just to be sure, turn off fan
+
   pinMode(STATUSLED,OUTPUT);
   pinMode(CS_CURRENT_DISPLAY,OUTPUT);
   pinMode(CS_PEAK_DISPLAY,OUTPUT);
@@ -69,7 +83,6 @@ void setup()
   pinMode(CURRENT_LED,OUTPUT);
   pinMode(PEAK_LED,OUTPUT);
   pinMode(BEST_LED,OUTPUT);
-  pinMode(RELAY,OUTPUT);
 
   pinMode(BUTTON_START,INPUT);
   digitalWrite(BUTTON_START,HIGH); // turn on pullup
@@ -98,73 +111,98 @@ void setup()
 
   // initialize serial port
   Serial.begin(9600);
-  delay(10);
-  Serial.println("RESET");
+  delay(100);
+  Serial.println("Hi!");
+  Serial.println("Wind Machine Exhibit");
 
   // init globals (set high to test LEDs on reset, will reset to zero using resetpeak()
   currentRPM = 1000;
   peakRPM = 1000;
   bestRPM = 1000;
-  stopped = ZERODELAY;
-  last = 0;
   currentLEDPWM = 255;
   peakLEDPWM = 255;
   bestLEDPWM = 255;
   bargraphdivisor = 34;
 
+  timeLastInteraction = 0;
+  timeSinceLastTick = 0;
+  timeResetBestRPM = millis();
+  
+  fanOn = false;
+
   // reset working values to zero
   resetPeak(true);
-  
+
+  wdt_enable(WDTO_250MS); //Unleash the beast
+
   // turn on interrupts
-  attachInterrupt(0,interrupt,FALLING);
+  attachInterrupt(0,irTick,FALLING);
   interrupts();
 }
 
 void loop() // ths subroutine runs continuously after setup() ends
 {
+  wdt_reset(); //Pet the dog
+
   delay(1); // slow down this loop
 
   // an interrupt occurred in the previous loop, handle it now
   // the interrupt calculates tempRPM internally, copy to currentRPM so it doesn't change unexpectedly
   if (gotint)
   {
-    Serial.println("I");
+    Serial.print("I");
+
     gotint = false;
 
     currentRPM = word(tempRPM); // grab the RPM value calculated by the interrupt routine
 
-    stopped = 0; // reset the stopped timer
-
-    // reset the peak values if necessary and pulse LEDs
-    if (currentRPM > peakRPM)
-    {
-      peakRPM = currentRPM;
-      peakLEDPWM = 255;
-    }
-    if (currentRPM > bestRPM)
-    {
-      bestRPM = currentRPM;
-      bestLEDPWM = 255;
+    // Inrease the peak values if necessary and pulse LEDs
+    if(currentRPM < 9999) { //Mild error checking
+      if (currentRPM > peakRPM)
+      {
+        peakRPM = currentRPM;
+        peakLEDPWM = 255;
+      }
+      if (currentRPM > bestRPM)
+      {
+        bestRPM = currentRPM;
+        bestLEDPWM = 255;
+      }
     }
 
     // pulse LED
     currentLEDPWM = 255;
     updateDisplays();
+
+    //Machine is being used so update the timeLastInteraction variable to the current time
+    timeLastInteraction = millis();
   }
 
   // zero currentRPM and displays if we don't get a reading in ZERODELAY ms
-  // this also zeros the displays every minute (63353ms) in case they're corrupted
-  if (stopped > ZERODELAY)
+  // this also zeros the displays every minute (1000ms) in case they're corrupted
+  if (millis() - timeLastInteraction > ZERODELAY)
   {
-    currentRPM = 0; 
-    last = 0ul;
-    updateDisplays();
+    Serial.println("No machine use after 1 minute - resetting vars");
+
+    resetPeak(false);
+    timeLastInteraction = millis(); //Bring the variable up to current time
   }
-  stopped++;
+  //zero maxRPM and update the displays displays every ZERODELAY_MAXRPM ms
+  //Only reset max if no one is using the exhibit (fan is off)
+  if (fanOn == false && (millis() - timeResetBestRPM) > ZERODELAY_BESTRPM)
+  {
+    Serial.println("Resetting bestRPM");
+    resetPeak(true);
+    
+    timeResetBestRPM = millis(); //Bring the variable up to current time
+  }
 
   // reset button pressed
   if (digitalRead(BUTTON_RESET) == 0)
   {
+    //Machine is being used so update the timeLastInteraction variable to the current time
+    timeLastInteraction = millis();
+
     // reduce the displays to zero in an entertaining way
     resetPeak(false);
   }
@@ -173,16 +211,21 @@ void loop() // ths subroutine runs continuously after setup() ends
   // (fan will stay on if button is held down)
   if (digitalRead(BUTTON_START) == 0)
   {
-    relaytimer = 1000; // ms, 1 second
+    Serial.println("Turning on fan!");
+
+    //Machine is being used so update the timeLastInteraction variable to the current time
+    timeLastInteraction = millis();
+
+    relayTimer = millis();
+    digitalWrite(RELAY,HIGH); //Turn on fan
+    fanOn = true;
   }
-  if (relaytimer > 0)
+  if (fanOn == true && abs(millis() - relayTimer) > fanRunTime) //Turn off after some amount of time (probably 15 seconds)
   {
-    relaytimer--;
-    digitalWrite(RELAY,HIGH);
-  }
-  else
-  {
-    digitalWrite(RELAY,LOW);
+    Serial.println("Turning off fan");
+    digitalWrite(RELAY,LOW); //Turn off fan
+
+    fanOn = false;
   }
 
   // pulse LEDs if value increases
@@ -216,22 +259,26 @@ void updateDisplays() // update all displays
   serial7segmentWrite(peakRPM, CS_PEAK_DISPLAY);
   serial7segmentWrite(bestRPM, CS_BEST_DISPLAY);
   bargraphWrite(currentRPM/bargraphdivisor, peakRPM/bargraphdivisor);
+
+  wdt_reset(); //Pet the dog
 }
 
-void interrupt()
+void irTick()
 // runs asynchronously on falling edge of D2
 // takes timing values and sets flag for main loop
 {
-  time = micros();
+  wdt_reset(); //Pet the dog
+
+  timeCurrentTick = micros();
   // check if last > 0 (we have a previous reading) and
   //          time > last (we're not measuring across the microsecond rollover)
-  if ((last > 0) && (time > last))
+  if ((timeSinceLastTick > 0) && (timeCurrentTick > timeSinceLastTick))
   {
-    interval = time - last;
+    interval = timeCurrentTick - timeSinceLastTick; //This can not be negative
     tempRPM = 60000000ul / interval;
     gotint = true;
   }
-  last = time;      // else skip this reading (next one will work OK)
+  timeSinceLastTick = timeCurrentTick;      // else skip this reading (next one will work OK)
 }
 
 void serial7segmentWrite(unsigned int number, byte sspin)
@@ -269,20 +316,56 @@ void serial7segmentWrite(unsigned int number, byte sspin)
   digitalWrite(sspin,LOW);
   SPI.transfer(string[3]);
   digitalWrite(sspin,HIGH); 
+
+  wdt_reset(); //Pet the dog
 }
 
-void resetPeak(boolean resetbest)
+void resetPeak(boolean resetBest)
 // reduce displays to zero in a hopefully entertaining way
 {
-  while ((peakRPM > 0) || (currentRPM > 0))
+  //Setup step down rates
+  const int attackRate = 100; //Tweak this up or down to adjust speed that graph drops 
+  int bestSDR = bestRPM / attackRate; 
+  if(bestSDR == 0) bestSDR = 1; //Catch a fringe case where sdr is zero
+
+  int currentSDR = currentRPM / attackRate;
+  if(currentSDR == 0) currentSDR = 1;
+
+  int peakSDR = peakRPM / attackRate;
+  if(peakSDR == 0) peakSDR = 1;
+
+
+  while ((peakRPM > 0) || (currentRPM > 0) || (resetBest == true && bestRPM > 0))
   {
-    if (resetbest) if (bestRPM > 0) bestRPM--;
-    if (peakRPM > 0) peakRPM--;
-    if (currentRPM > 0) currentRPM--;
+    wdt_reset(); //Pet the dog
+
+    if (resetBest){
+      //We may be in a situation where bargraphdivsor is 1
+      if (bestRPM > bestSDR){
+        bestRPM -= bestSDR;
+      }
+      else if (bestRPM > 0) bestRPM--;
+    }
+
+    if (peakRPM > peakSDR){
+      peakRPM -= peakSDR;
+    }
+    else if(peakRPM > 0) peakRPM--;
+
+    if (currentRPM > currentSDR){
+      currentRPM -= currentSDR;
+    }
+    else if (currentRPM > 0) currentRPM--;
+
     updateDisplays();
     delay(1);
   }
-  last = 0ul;
+
+  timeCurrentTick = micros(); //Bring both these to current time to negate any interrupts we received during peak resetting
+  timeSinceLastTick = 0;
+  tempRPM = 0;
+  gotint = false;
+  
   bargraphdivisor = lowestbargraphdivisor;
 }
 
@@ -393,6 +476,8 @@ void bargraphWrite(int number,int peakSegment)
 
   // write b1-b4 to SPI
   bargraphRawWrite(b1,b2,b3,b4);
+
+  wdt_reset(); //Pet the dog
 }
 
 void bargraphRawWrite(byte b1, byte b2, byte b3, byte b4)
@@ -404,6 +489,7 @@ void bargraphRawWrite(byte b1, byte b2, byte b3, byte b4)
   SPI.transfer(b1);
   digitalWrite(BARGRAPH_LATCH,HIGH);
 }
+
 
 
 
